@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#211B63">
+    <title>MID — Manajemen Informasi Dakwah</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="loginPage" class="login-page">
+    <div class="login-card">
+        <div class="login-brand">
+            <div class="login-logo">MID</div>
+            <h1>Manajemen Informasi Dakwah</h1>
+            <p>Membangun Gagasan, Menggerakkan Perubahan.</p>
+        </div>
+        <div class="login-heading">
+            <h2>Selamat Datang</h2>
+            <p>Silakan masuk ke akun MID Anda.</p>
+        </div>
+        <form id="loginForm">
+            <label for="loginEmail">Email</label>
+            <input type="email" id="loginEmail" placeholder="Masukkan email" autocomplete="username" required>
+            <label for="loginPassword">Kata Sandi</label>
+            <input type="password" id="loginPassword" placeholder="Masukkan kata sandi" autocomplete="current-password" required>
+            <button type="submit" class="login-button">Masuk</button>
+            <p id="loginMessage" class="login-message"></p>
+        </form>
+        <div class="login-footer">
+            <p>Belum memiliki akun?</p>
+            <button type="button" id="registerLink">Daftar sebagai anggota</button>
+        </div>
+    </div>
+</div>
+
+<div id="appPage" style="display:none;">
+    <div class="app">
+        <aside class="sidebar">
+            <div class="brand">
+                <h2>MID</h2>
+                <p>Manajemen Informasi Dakwah</p>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="menu-item active" data-page="dashboard">Dashboard</a>
+                <div class="menu-group">
+                    <button class="group-toggle" data-group="manajemen" aria-expanded="false">Manajemen <span class="group-arrow">⌄</span></button>
+                    <div class="group-menu" id="group-manajemen">
+                        <a href="#" class="menu-item" data-page="anggota">Anggota</a>
+                        <a href="#" class="menu-item" data-page="kegiatan">Kegiatan</a>
+                        <a href="#" class="menu-item" data-page="pendaftaran">Pendaftaran</a>
+                        <a href="#" class="menu-item" data-page="presensi">Presensi</a>
+                        <a href="#" class="menu-item" data-page="angket">Angket</a>
+                        <a href="#" class="menu-item" data-page="kaderisasi">Kaderisasi</a>
+                        <a href="#" class="menu-item" data-page="susulan">Kegiatan Susulan</a>
+                    </div>
+                </div>
+                <div class="menu-group">
+                    <button class="group-toggle" data-group="monitoring" aria-expanded="false">Monitoring <span class="group-arrow">⌄</span></button>
+                    <div class="group-menu" id="group-monitoring">
+                        <a href="#" class="menu-item" data-page="laporan-organisasi">Laporan Organisasi</a>
+                        <a href="#" class="menu-item" data-page="laporan-anggota">Laporan Anggota</a>
+                        <a href="#" class="menu-item" data-page="ekspor-angket">Ekspor Angket</a>
+                    </div>
+                </div>
+                <div class="menu-group">
+                    <button class="group-toggle" data-group="konten" aria-expanded="false">Konten <span class="group-arrow">⌄</span></button>
+                    <div class="group-menu" id="group-konten">
+                        <a href="#" class="menu-item" data-page="artikel">Artikel</a>
+                        <a href="#" class="menu-item" data-page="program">Program</a>
+                        <a href="#" class="menu-item" data-page="galeri">Galeri</a>
+                    </div>
+                </div>
+                <div class="menu-group">
+                    <button class="group-toggle" data-group="pengaturan" aria-expanded="false">Pengaturan <span class="group-arrow">⌄</span></button>
+                    <div class="group-menu" id="group-pengaturan">
+                        <a href="#" class="menu-item" data-page="sistem">Pengaturan Sistem</a>
+                        <a href="#" class="menu-item" data-page="admin">Administrator</a>
+                    </div>
+                </div>
+            </nav>
+            <button id="logoutButton" class="logout-button">Keluar</button>
+        </aside>
+        <main class="main-content">
+            <header class="topbar">
+                <button id="menuToggle" class="menu-toggle">☰</button>
+                <div>
+                    <h3 id="pageTitle">Dashboard</h3>
+                    <p id="pageDescription">Ringkasan aktivitas MID</p>
+                </div>
+                <div class="profile">Administrator</div>
+            </header>
+            <section class="stats-grid" id="dashboardStats">
+                <div class="stat-card"><span>Total Anggota</span><h2>0</h2></div>
+                <div class="stat-card"><span>Total Kegiatan</span><h2>0</h2></div>
+                <div class="stat-card"><span>Anggota Aktif</span><h2>0</h2></div>
+                <div class="stat-card"><span>Menunggu Persetujuan</span><h2>0</h2></div>
+            </section>
+            <section class="panel">
+                <div class="panel-heading">
+                    <h2 id="panelTitle">Selamat Datang di MID</h2>
+                    <p id="panelDescription">Sistem Manajemen Informasi Dakwah.</p>
+                </div>
+                <div id="pageContent"></div>
+            </section>
+        </main>
+    </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
