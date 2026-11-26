@@ -25,6 +25,16 @@ const db = firebase.firestore();
 const MEMBERS_COLLECTION = "members";
 const EVENTS_COLLECTION = "events";
 const ADMINS_COLLECTION = "admins";
+const MANAGEMENT_COLLECTIONS = {
+    pendaftaran: "registrations",
+    presensi: "attendances",
+    angket: "surveys",
+    kaderisasi: "cadre_evaluations",
+    susulan: "makeup_activities"
+};
+let managementCache = {
+    pendaftaran: [], presensi: [], angket: [], kaderisasi: [], susulan: []
+};
 
 let currentUser = null;
 let members = [];
@@ -932,6 +942,222 @@ async function updateMember(event, id) {
 }
 
 // ===================================
+// MODUL MANAJEMEN LANJUTAN — FIRESTORE
+// ===================================
+
+const managementSchemas = {
+    pendaftaran: {
+        title: "Pendaftaran Kegiatan",
+        description: "Kelola pengajuan peserta dan keputusan administrator.",
+        fields: [
+            { key: "eventId", label: "Kegiatan", type: "event" },
+            { key: "memberId", label: "Anggota", type: "member" },
+            { key: "status", label: "Status", type: "select", options: ["Menunggu", "Disetujui", "Ditolak"] },
+            { key: "note", label: "Catatan", type: "textarea", optional: true }
+        ],
+        columns: ["eventTitle", "memberName", "status", "createdAt"],
+        labels: { eventTitle: "Kegiatan", memberName: "Anggota", status: "Status", createdAt: "Tanggal" }
+    },
+    presensi: {
+        title: "Presensi Kegiatan",
+        description: "Catat kehadiran peserta pada setiap kegiatan.",
+        fields: [
+            { key: "eventId", label: "Kegiatan", type: "event" },
+            { key: "memberId", label: "Anggota", type: "member" },
+            { key: "date", label: "Tanggal Presensi", type: "date" },
+            { key: "status", label: "Kehadiran", type: "select", options: ["Hadir", "Izin", "Sakit", "Alpa"] },
+            { key: "note", label: "Keterangan", type: "textarea", optional: true }
+        ],
+        columns: ["eventTitle", "memberName", "date", "status"],
+        labels: { eventTitle: "Kegiatan", memberName: "Anggota", date: "Tanggal", status: "Kehadiran" }
+    },
+    angket: {
+        title: "Pengelolaan Angket",
+        description: "Buat instrumen angket dan pantau status pengumpulan jawaban.",
+        fields: [
+            { key: "title", label: "Judul Angket", type: "text" },
+            { key: "eventId", label: "Kegiatan terkait", type: "event", optional: true },
+            { key: "question", label: "Pertanyaan", type: "textarea" },
+            { key: "type", label: "Jenis Jawaban", type: "select", options: ["Teks", "Skala 1–5", "Pilihan"] },
+            { key: "options", label: "Pilihan jawaban (pisahkan dengan koma)", type: "text", optional: true },
+            { key: "status", label: "Status", type: "select", options: ["Draft", "Aktif", "Ditutup"] }
+        ],
+        columns: ["title", "eventTitle", "type", "status"],
+        labels: { title: "Angket", eventTitle: "Kegiatan", type: "Jenis", status: "Status" }
+    },
+    kaderisasi: {
+        title: "Evaluasi Kaderisasi",
+        description: "Catat perkembangan, penilaian, dan catatan pembinaan anggota.",
+        fields: [
+            { key: "memberId", label: "Anggota", type: "member" },
+            { key: "date", label: "Tanggal Evaluasi", type: "date" },
+            { key: "aspect", label: "Aspek Evaluasi", type: "select", options: ["Keislaman", "Kepemimpinan", "Intelektual", "Komunikasi", "Sosial", "Komitmen", "Lainnya"] },
+            { key: "score", label: "Skor (1–5)", type: "number", min: 1, max: 5 },
+            { key: "evaluator", label: "Evaluator", type: "text" },
+            { key: "notes", label: "Catatan Evaluasi", type: "textarea", optional: true }
+        ],
+        columns: ["memberName", "date", "aspect", "score", "evaluator"],
+        labels: { memberName: "Anggota", date: "Tanggal", aspect: "Aspek", score: "Skor", evaluator: "Evaluator" }
+    },
+    susulan: {
+        title: "Kegiatan Susulan",
+        description: "Kelola penugasan atau kegiatan pengganti bagi anggota.",
+        fields: [
+            { key: "memberId", label: "Anggota", type: "member" },
+            { key: "eventId", label: "Kegiatan Asal", type: "event" },
+            { key: "activity", label: "Bentuk Kegiatan Susulan", type: "text" },
+            { key: "date", label: "Tanggal Pelaksanaan", type: "date" },
+            { key: "status", label: "Status", type: "select", options: ["Ditugaskan", "Dalam Proses", "Selesai", "Dibatalkan"] },
+            { key: "notes", label: "Catatan", type: "textarea", optional: true }
+        ],
+        columns: ["memberName", "eventTitle", "activity", "date", "status"],
+        labels: { memberName: "Anggota", eventTitle: "Kegiatan Asal", activity: "Kegiatan Susulan", date: "Tanggal", status: "Status" }
+    }
+};
+
+function managementOptionList(field) {
+    if (field.type === "member") return members.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} — ${escapeHTML(m.number || m.level || "Anggota")}</option>`).join("");
+    if (field.type === "event") return events.map(e => `<option value="${escapeHTML(e.id)}">${escapeHTML(e.title)}</option>`).join("");
+    return (field.options || []).map(v => `<option value="${escapeHTML(v)}">${escapeHTML(v)}</option>`).join("");
+}
+
+function managementFieldHTML(field) {
+    const required = field.optional ? "" : "required";
+    let control = "";
+    if (field.type === "select" || field.type === "member" || field.type === "event") {
+        const empty = field.optional ? `<option value="">— Tidak dipilih —</option>` : `<option value="">Pilih ${escapeHTML(field.label.toLowerCase())}</option>`;
+        control = `<select name="${field.key}" ${required}>${empty}${managementOptionList(field)}</select>`;
+    } else if (field.type === "textarea") {
+        control = `<textarea name="${field.key}" rows="3" ${required}></textarea>`;
+    } else {
+        const extra = field.min !== undefined ? `min="${field.min}" max="${field.max}"` : "";
+        control = `<input type="${field.type}" name="${field.key}" ${extra} ${required} ${field.type === "date" ? `value="${getTodayISO()}"` : ""}>`;
+    }
+    return `<label class="mid-field"><span>${escapeHTML(field.label)}${field.optional ? " (opsional)" : ""}</span>${control}</label>`;
+}
+
+function getTodayISO() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function resolveManagementNames(module, record) {
+    const member = members.find(m => String(m.id) === String(record.memberId));
+    const event = events.find(e => String(e.id) === String(record.eventId));
+    return { ...record, memberName: member?.name || record.memberName || "Anggota tidak ditemukan", eventTitle: event?.title || record.eventTitle || "—" };
+}
+
+async function loadManagementRecords(module) {
+    const snapshot = await db.collection(MANAGEMENT_COLLECTIONS[module]).get();
+    managementCache[module] = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+    return managementCache[module];
+}
+
+async function renderManagementModule(module) {
+    const schema = managementSchemas[module];
+    if (!schema) return;
+    const content = document.getElementById("pageContent");
+    content.innerHTML = `<div class="dashboard-note">Memuat ${escapeHTML(schema.title)}...</div>`;
+    try {
+        await loadManagementRecords(module);
+        renderManagementContent(module);
+    } catch (error) {
+        console.error(`Gagal memuat modul ${module}:`, error);
+        content.innerHTML = `<div class="dashboard-note"><strong>Data belum dapat dimuat.</strong><p>Periksa koneksi internet dan Firestore Rules, lalu muat ulang modul ini.</p><button class="secondary-button" onclick="renderManagementModule('${module}')">Coba Lagi</button></div>`;
+    }
+}
+
+function renderManagementContent(module) {
+    const schema = managementSchemas[module];
+    const records = (managementCache[module] || []).map(r => resolveManagementNames(module, r));
+    const fields = schema.fields.map(managementFieldHTML).join("");
+    const headers = schema.columns.map(key => `<th>${escapeHTML(schema.labels[key] || key)}</th>`).join("");
+    const rows = records.map(record => `<tr>${schema.columns.map(key => `<td>${escapeHTML(record[key] ?? "—")}</td>`).join("")}<td class="mid-actions"><button class="secondary-button small" onclick="editManagementRecord('${module}','${escapeHTML(record.id)}')">Ubah</button><button class="danger-button small" onclick="deleteManagementRecord('${module}','${escapeHTML(record.id)}')">Hapus</button></td></tr>`).join("");
+    document.getElementById("pageContent").innerHTML = `
+        <section class="mid-module-intro"><div><h3>${escapeHTML(schema.title)}</h3><p>${escapeHTML(schema.description)}</p></div><span class="mid-count">${records.length} data</span></section>
+        <form class="mid-module-form" id="form-${module}" onsubmit="saveManagementRecord(event,'${module}')">
+            <input type="hidden" name="recordId" value="">
+            <div class="mid-form-grid">${fields}</div>
+            <div class="mid-form-actions"><button type="submit" class="primary-button">Simpan Data</button><button type="reset" class="secondary-button" onclick="resetManagementForm('${module}')">Kosongkan</button></div>
+            <p class="mid-form-message" id="message-${module}"></p>
+        </form>
+        <div class="mid-table-wrap"><table class="mid-table"><thead><tr>${headers}<th>Aksi</th></tr></thead><tbody>${rows || `<tr><td colspan="${schema.columns.length+1}" class="mid-empty">Belum ada data.</td></tr>`}</tbody></table></div>`;
+}
+
+async function saveManagementRecord(event, module) {
+    event.preventDefault();
+    const schema = managementSchemas[module];
+    const form = event.target;
+    const button = form.querySelector('button[type="submit"]');
+    const message = document.getElementById(`message-${module}`);
+    const data = new FormData(form);
+    const id = String(data.get("recordId") || "").trim();
+    const record = { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    schema.fields.forEach(field => { record[field.key] = String(data.get(field.key) || "").trim(); });
+    if (record.eventId) record.eventTitle = events.find(e => String(e.id) === record.eventId)?.title || "";
+    if (record.memberId) record.memberName = members.find(m => String(m.id) === record.memberId)?.name || "";
+    if (module === "pendaftaran" && !id) record.submittedAt = record.createdAt;
+    if (module === "presensi" && !record.date) record.date = getTodayISO();
+    if (module === "angket") record.options = record.options ? record.options.split(",").map(x => x.trim()).filter(Boolean) : [];
+    if (module === "kaderisasi") record.score = Number(record.score || 0);
+    if (id) {
+        const old = (managementCache[module] || []).find(x => String(x.id) === id);
+        record.createdAt = old?.createdAt || record.createdAt;
+    }
+    button.disabled = true; button.textContent = "Menyimpan...";
+    try {
+        const ref = id ? db.collection(MANAGEMENT_COLLECTIONS[module]).doc(id) : db.collection(MANAGEMENT_COLLECTIONS[module]).doc();
+        await ref.set(record, { merge: true });
+        await loadManagementRecords(module);
+        renderManagementContent(module);
+    } catch (error) {
+        console.error(`Gagal menyimpan ${module}:`, error);
+        message.textContent = "Gagal menyimpan. Periksa koneksi dan aturan Firestore.";
+        button.disabled = false; button.textContent = "Simpan Data";
+    }
+}
+
+function editManagementRecord(module, id) {
+    const record = (managementCache[module] || []).find(x => String(x.id) === String(id));
+    if (!record) return;
+    const form = document.getElementById(`form-${module}`);
+    if (!form) return;
+    form.elements.recordId.value = record.id;
+    managementSchemas[module].fields.forEach(field => {
+        const control = form.elements[field.key];
+        if (!control) return;
+        let value = record[field.key] ?? "";
+        if (field.key === "options" && Array.isArray(value)) value = value.join(", ");
+        control.value = value;
+    });
+    form.querySelector('button[type="submit"]').textContent = "Perbarui Data";
+    form.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function resetManagementForm(module) {
+    const form = document.getElementById(`form-${module}`);
+    if (!form) return;
+    setTimeout(() => {
+        form.elements.recordId.value = "";
+        const button = form.querySelector('button[type="submit"]');
+        if (button) button.textContent = "Simpan Data";
+    }, 0);
+}
+
+async function deleteManagementRecord(module, id) {
+    const record = (managementCache[module] || []).find(x => String(x.id) === String(id));
+    if (!record || !confirm("Hapus data ini secara permanen?")) return;
+    try {
+        await db.collection(MANAGEMENT_COLLECTIONS[module]).doc(String(id)).delete();
+        await loadManagementRecords(module);
+        renderManagementContent(module);
+    } catch (error) {
+        console.error(`Gagal menghapus ${module}:`, error);
+        alert("Data gagal dihapus. Periksa koneksi dan Firestore Rules.");
+    }
+}
+
+// ===================================
 // NAVIGASI
 // ===================================
 
@@ -969,7 +1195,8 @@ function openPage(page) {
         document.getElementById("panelDescription").textContent = data.description;
         if (page === "anggota") renderMembers();
         else if (page === "kegiatan") renderEvents();
-        else content.innerHTML = `<div class="dashboard-note"><strong>${escapeHTML(data.title)}</strong><p>Modul ini akan kita kembangkan pada tahap berikutnya.</p></div>`;
+        else if (MANAGEMENT_COLLECTIONS[page]) renderManagementModule(page);
+        else content.innerHTML = `<div class="dashboard-note"><strong>${escapeHTML(data.title)}</strong><p>Modul ini berada di luar tahap pengembangan Manajemen.</p></div>`;
     }
     document.querySelector(".sidebar").classList.remove("show");
 }
@@ -1015,7 +1242,7 @@ auth.onAuthStateChanged(async function(user) {
     try {
         // Setiap akun administrator harus memiliki dokumen admins/{UID}.
         const adminDoc = await db.collection(ADMINS_COLLECTION).doc(user.uid).get();
-        if (!adminDoc.exists || adminDoc.data()?.active === false) {
+        if (!adminDoc.exists || adminDoc.data()?.active !== true) {
             await auth.signOut();
             loginMessage.textContent = "Akun ini belum memiliki hak akses administrator MID.";
             return;
@@ -1102,5 +1329,49 @@ Object.assign(window, {
     canMemberViewEvent,
     canMemberJoinEvent,
     canMemberRegisterEvent,
-    getEventRegistrationState
+    getEventRegistrationState,
+    renderManagementModule,
+    saveManagementRecord,
+    editManagementRecord,
+    deleteManagementRecord,
+    resetManagementForm
 });
+
+// ===================================
+// STYLE TAMBAHAN MODUL MANAJEMEN
+// Tidak menghapus tema utama dari style.css.
+// ===================================
+(function injectManagementStyles() {
+    if (document.getElementById("mid-management-styles")) return;
+    const style = document.createElement("style");
+    style.id = "mid-management-styles";
+    style.textContent = `
+      .mid-module-intro{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:8px 0 20px}
+      .mid-module-intro h3{margin:0 0 6px;color:var(--ink,#211b63)}
+      .mid-module-intro p{margin:0;color:var(--muted,#687080);line-height:1.5}
+      .mid-count{white-space:nowrap;border-radius:999px;background:#eeedfa;color:#312b79;padding:7px 12px;font-size:12px;font-weight:700}
+      .mid-module-form{background:#f8f9fc;border:1px solid #e6e8f0;border-radius:14px;padding:18px;margin-bottom:22px}
+      .mid-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+      .mid-field{display:flex;flex-direction:column;gap:7px;color:#34364a;font-size:13px;font-weight:600}
+      .mid-field input,.mid-field select,.mid-field textarea{width:100%;box-sizing:border-box;border:1px solid #d9dce7;border-radius:9px;background:#fff;padding:11px 12px;font:inherit;font-weight:400;color:#25263a;outline:none}
+      .mid-field input:focus,.mid-field select:focus,.mid-field textarea:focus{border-color:#6258b5;box-shadow:0 0 0 3px rgba(98,88,181,.12)}
+      .mid-field textarea{resize:vertical;min-height:82px}
+      .mid-form-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}
+      .mid-form-message{font-size:13px;color:#a33;margin:8px 0 0}
+      .mid-table-wrap{width:100%;overflow-x:auto;border:1px solid #e8e9ef;border-radius:12px}
+      .mid-table{width:100%;border-collapse:collapse;min-width:640px;background:#fff}
+      .mid-table th,.mid-table td{padding:12px 13px;text-align:left;border-bottom:1px solid #ececf1;font-size:13px;vertical-align:middle}
+      .mid-table th{background:#f6f6fa;color:#42445b;font-weight:700;white-space:nowrap}
+      .mid-table tr:last-child td{border-bottom:0}
+      .mid-empty{text-align:center!important;color:#7b7d8c;padding:26px!important}
+      .mid-actions{display:flex;gap:6px;white-space:nowrap}
+      .mid-actions button,.mid-form-actions button{cursor:pointer;border:0;border-radius:8px;padding:9px 12px;font-weight:600}
+      .mid-actions .small{font-size:12px;padding:7px 9px}
+      .mid-actions .secondary-button,.mid-form-actions .secondary-button{background:#e9eaf1;color:#34364a}
+      .mid-actions .danger-button{background:#fff0f0;color:#a52b36}
+      .mid-form-actions .primary-button{background:#29236f;color:#fff}
+      .mid-form-actions button:disabled{opacity:.6;cursor:wait}
+      @media(max-width:650px){.mid-form-grid{grid-template-columns:1fr}.mid-module-intro{flex-direction:column}.mid-module-form{padding:13px}.mid-table th,.mid-table td{padding:10px}}
+    `;
+    document.head.appendChild(style);
+})();
