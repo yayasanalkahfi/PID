@@ -25,6 +25,49 @@ const db = firebase.firestore();
 const MEMBERS_COLLECTION = "members";
 const EVENTS_COLLECTION = "events";
 const ADMINS_COLLECTION = "admins";
+const MONITORING_COLLECTIONS = {
+    artikel: "content_articles",
+    program: "content_programs",
+    galeri: "content_gallery"
+};
+const CONTENT_SCHEMAS = {
+    artikel: {
+        title: "Artikel", description: "Kelola tulisan, gagasan, dan publikasi MID.", collection: "content_articles",
+        fields: [
+            {key:"title",label:"Judul Artikel",type:"text"},
+            {key:"category",label:"Kategori",type:"select",options:["Dakwah","Keislaman","Pendidikan","Sosial","Organisasi","Opini","Lainnya"]},
+            {key:"author",label:"Penulis",type:"text"},
+            {key:"excerpt",label:"Ringkasan",type:"textarea"},
+            {key:"body",label:"Isi Artikel",type:"textarea"},
+            {key:"coverUrl",label:"URL Gambar Sampul",type:"url",optional:true},
+            {key:"status",label:"Status Publikasi",type:"select",options:["Draft","Terbit","Arsip"]}
+        ], columns:["title","category","author","status","updatedAt"]
+    },
+    program: {
+        title: "Program", description: "Kelola program kerja dan inisiatif organisasi.", collection: "content_programs",
+        fields: [
+            {key:"title",label:"Nama Program",type:"text"},
+            {key:"category",label:"Bidang Program",type:"select",options:["Pendidikan","Keislaman","Sosial","Kepemudaan","Kaderisasi","Media","Lainnya"]},
+            {key:"description",label:"Deskripsi",type:"textarea"},
+            {key:"target",label:"Sasaran",type:"text",optional:true},
+            {key:"startDate",label:"Tanggal Mulai",type:"date",optional:true},
+            {key:"endDate",label:"Tanggal Selesai",type:"date",optional:true},
+            {key:"status",label:"Status Program",type:"select",options:["Perencanaan","Berjalan","Selesai","Ditunda","Dibatalkan"]}
+        ], columns:["title","category","status","startDate","endDate"]
+    },
+    galeri: {
+        title: "Galeri", description: "Kelola dokumentasi dan tautan media kegiatan MID.", collection: "content_gallery",
+        fields: [
+            {key:"title",label:"Judul Dokumentasi",type:"text"},
+            {key:"eventId",label:"Kegiatan Terkait",type:"event",optional:true},
+            {key:"mediaUrl",label:"URL Foto/Video",type:"url"},
+            {key:"caption",label:"Keterangan",type:"textarea",optional:true},
+            {key:"date",label:"Tanggal Dokumentasi",type:"date",optional:true},
+            {key:"status",label:"Status",type:"select",options:["Tampil","Draft","Arsip"]}
+        ], columns:["title","eventTitle","date","status"]
+    }
+};
+let contentCache = { artikel: [], program: [], galeri: [] };
 const MANAGEMENT_COLLECTIONS = {
     pendaftaran: "registrations",
     presensi: "attendances",
@@ -1158,6 +1201,169 @@ async function deleteManagementRecord(module, id) {
 }
 
 // ===================================
+// MONITORING — LAPORAN ORGANISASI & ANGGOTA
+// ===================================
+async function readCollection(name) {
+    const snap = await db.collection(name).get();
+    return snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+}
+function csvCell(value) {
+    const text = String(value ?? "");
+    return '"' + text.replace(/"/g, '""') + '"';
+}
+function downloadCSV(filename, rows) {
+    const csv = rows.map(row => row.map(csvCell).join(",")).join("\r\n");
+    const blob = new Blob(["\ufeff" + csv], {type:"text/csv;charset=utf-8;"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+async function renderOrganizationReport() {
+    const el = document.getElementById("pageContent");
+    el.innerHTML = '<div class="dashboard-note">Menghimpun data organisasi dari Firestore...</div>';
+    try {
+        const [regs, attendance, surveys, cadre, makeup] = await Promise.all([
+            readCollection("registrations"), readCollection("attendances"),
+            readCollection("surveys"), readCollection("cadre_evaluations"), readCollection("makeup_activities")
+        ]);
+        const active = members.filter(m => String(m.status || "").toLowerCase() === "aktif").length;
+        const pending = regs.filter(x => x.status === "Menunggu").length;
+        const present = attendance.filter(x => x.status === "Hadir").length;
+        const attendanceRate = attendance.length ? Math.round(present / attendance.length * 100) : 0;
+        const completedMakeup = makeup.filter(x => x.status === "Selesai").length;
+        el.innerHTML = `
+          <div class="mid-report-grid">
+            <div class="mid-report-card"><span>Total Anggota</span><strong>${members.length}</strong></div>
+            <div class="mid-report-card"><span>Anggota Aktif</span><strong>${active}</strong></div>
+            <div class="mid-report-card"><span>Total Kegiatan</span><strong>${events.length}</strong></div>
+            <div class="mid-report-card"><span>Pendaftaran Menunggu</span><strong>${pending}</strong></div>
+            <div class="mid-report-card"><span>Tingkat Kehadiran</span><strong>${attendanceRate}%</strong><small>${present} dari ${attendance.length} catatan presensi</small></div>
+            <div class="mid-report-card"><span>Angket Aktif</span><strong>${surveys.filter(x=>x.status==="Aktif").length}</strong></div>
+            <div class="mid-report-card"><span>Evaluasi Kaderisasi</span><strong>${cadre.length}</strong></div>
+            <div class="mid-report-card"><span>Susulan Selesai</span><strong>${completedMakeup}</strong></div>
+          </div>
+          <div class="dashboard-section"><div class="section-heading"><div><h3>Ringkasan Data</h3><p>Angka dihitung dari dokumen yang tersedia di Firestore saat halaman dibuka.</p></div></div>
+          <div class="mid-table-wrap"><table class="mid-table"><thead><tr><th>Indikator</th><th>Jumlah</th></tr></thead><tbody>
+          <tr><td>Anggota berdasarkan level T1</td><td>${members.filter(x=>x.level==="T1").length}</td></tr>
+          <tr><td>Anggota berdasarkan level T2</td><td>${members.filter(x=>x.level==="T2").length}</td></tr>
+          <tr><td>Anggota berdasarkan level T3</td><td>${members.filter(x=>x.level==="T3").length}</td></tr>
+          <tr><td>Total catatan presensi</td><td>${attendance.length}</td></tr>
+          <tr><td>Total evaluasi kaderisasi</td><td>${cadre.length}</td></tr>
+          <tr><td>Total kegiatan susulan</td><td>${makeup.length}</td></tr>
+          </tbody></table></div></div>
+          <button class="primary-button" onclick="exportOrganizationReport()">Unduh Ringkasan CSV</button>`;
+        window._midReportCache = {regs,attendance,surveys,cadre,makeup};
+    } catch (error) {
+        console.error("Laporan organisasi gagal dimuat:", error);
+        el.innerHTML = '<div class="dashboard-note"><strong>Laporan belum dapat dimuat.</strong><p>Periksa Firestore Rules dan pastikan koleksi modul manajemen sudah dapat dibaca.</p><button class="secondary-button" onclick="renderOrganizationReport()">Coba Lagi</button></div>';
+    }
+}
+function exportOrganizationReport() {
+    const c = window._midReportCache || {};
+    const rows = [["Indikator","Jumlah"], ["Total anggota",members.length], ["Anggota aktif",members.filter(m=>String(m.status||"").toLowerCase()==="aktif").length], ["Total kegiatan",events.length], ["Pendaftaran menunggu",(c.regs||[]).filter(x=>x.status==="Menunggu").length], ["Catatan presensi",(c.attendance||[]).length], ["Evaluasi kaderisasi",(c.cadre||[]).length], ["Kegiatan susulan",(c.makeup||[]).length]];
+    downloadCSV("MID-Laporan-Organisasi.csv", rows);
+}
+async function renderMemberReport() {
+    const el = document.getElementById("pageContent");
+    el.innerHTML = '<div class="dashboard-note">Memuat laporan anggota...</div>';
+    try {
+        const [attendance,cadre,regs] = await Promise.all([readCollection("attendances"),readCollection("cadre_evaluations"),readCollection("registrations")]);
+        const rows = members.map(m => {
+            const a=attendance.filter(x=>String(x.memberId)===String(m.id));
+            const c=cadre.filter(x=>String(x.memberId)===String(m.id));
+            const r=regs.filter(x=>String(x.memberId)===String(m.id));
+            const hadir=a.filter(x=>x.status==="Hadir").length;
+            const avg=c.length?(c.reduce((s,x)=>s+Number(x.score||0),0)/c.length).toFixed(2):"—";
+            return {...m,attendance:a.length,present:hadir,rate:a.length?Math.round(hadir/a.length*100)+"%":"—",evaluations:c.length,average:avg,registrations:r.length};
+        });
+        window._midMemberReportRows=rows;
+        el.innerHTML=`<div class="member-toolbar"><div><h3>Laporan Perkembangan Anggota</h3><p>Rekap kehadiran, pendaftaran, dan evaluasi kaderisasi setiap anggota.</p></div><button class="secondary-button" onclick="exportMemberReport()">Unduh CSV</button></div>
+        <div class="member-filters"><input id="memberReportSearch" type="search" placeholder="Cari nama atau nomor anggota..." oninput="filterMemberReport()"></div>
+        <div class="mid-table-wrap"><table class="mid-table"><thead><tr><th>Nama</th><th>Nomor</th><th>Level</th><th>Kehadiran</th><th>Rasio Hadir</th><th>Evaluasi</th><th>Rata-rata Skor</th><th>Pendaftaran</th></tr></thead><tbody id="memberReportBody">${memberReportRowsHTML(rows)}</tbody></table></div>`;
+    } catch(error) { console.error(error); el.innerHTML='<div class="dashboard-note">Laporan anggota gagal dimuat. Periksa koneksi dan Firestore Rules.</div>'; }
+}
+function memberReportRowsHTML(rows) {
+    return rows.map(x=>`<tr><td>${escapeHTML(x.name)}</td><td>${escapeHTML(x.number||"—")}</td><td>${escapeHTML(x.level||"—")}</td><td>${x.present}/${x.attendance}</td><td>${x.rate}</td><td>${x.evaluations}</td><td>${x.average}</td><td>${x.registrations}</td></tr>`).join("") || '<tr><td colspan="8" class="mid-empty">Belum ada data anggota.</td></tr>';
+}
+function filterMemberReport() {
+    const q=(document.getElementById("memberReportSearch")?.value||"").toLowerCase();
+    const rows=(window._midMemberReportRows||[]).filter(x=>(x.name+" "+(x.number||"")).toLowerCase().includes(q));
+    document.getElementById("memberReportBody").innerHTML=memberReportRowsHTML(rows);
+}
+function exportMemberReport() {
+    const rows=window._midMemberReportRows||[];
+    downloadCSV("MID-Laporan-Anggota.csv",[["Nama","Nomor","Level","Status","Hadir","Total Presensi","Rasio Hadir","Jumlah Evaluasi","Rata-rata Skor","Pendaftaran"],...rows.map(x=>[x.name,x.number,x.level,x.status,x.present,x.attendance,x.rate,x.evaluations,x.average,x.registrations])]);
+}
+async function renderSurveyExport() {
+    const el=document.getElementById("pageContent");
+    el.innerHTML='<div class="dashboard-note">Memuat data angket...</div>';
+    try {
+        const [surveys,responses]=await Promise.all([readCollection("surveys"),readCollection("survey_responses")]);
+        window._midSurveyExport={surveys,responses};
+        el.innerHTML=`<div class="mid-module-intro"><div><h3>Ekspor Hasil Angket</h3><p>Unduh daftar instrumen dan jawaban angket dalam format CSV.</p></div><span class="mid-count">${responses.length} jawaban</span></div>
+        <div class="mid-report-grid"><div class="mid-report-card"><span>Total Angket</span><strong>${surveys.length}</strong></div><div class="mid-report-card"><span>Total Jawaban</span><strong>${responses.length}</strong></div></div>
+        <div class="mid-form-actions"><button class="primary-button" onclick="exportSurveyDefinitions()">Ekspor Daftar Angket</button><button class="secondary-button" onclick="exportSurveyResponses()">Ekspor Jawaban Angket</button></div>
+        <div class="mid-table-wrap"><table class="mid-table"><thead><tr><th>Angket</th><th>Status</th><th>Jumlah Jawaban</th></tr></thead><tbody>${surveys.map(s=>`<tr><td>${escapeHTML(s.title||"Tanpa judul")}</td><td>${escapeHTML(s.status||"—")}</td><td>${responses.filter(r=>String(r.surveyId)===String(s.id)).length}</td></tr>`).join("")||'<tr><td colspan="3" class="mid-empty">Belum ada angket.</td></tr>'}</tbody></table></div>`;
+    } catch(error){console.error(error);el.innerHTML='<div class="dashboard-note">Data ekspor angket gagal dimuat. Periksa Firestore Rules.</div>';}
+}
+function exportSurveyDefinitions(){const s=window._midSurveyExport?.surveys||[];downloadCSV("MID-Daftar-Angket.csv",[["Judul","Pertanyaan","Jenis","Status","Kegiatan"],...s.map(x=>[x.title,x.question,x.type,x.status,x.eventTitle])]);}
+function exportSurveyResponses(){const r=window._midSurveyExport?.responses||[];downloadCSV("MID-Jawaban-Angket.csv",[["ID Angket","ID Anggota","Nama Anggota","Jawaban","Waktu"],...r.map(x=>[x.surveyId,x.memberId,x.memberName,typeof x.answer==="object"?JSON.stringify(x.answer):x.answer,x.createdAt])]);}
+
+// ===================================
+// KONTEN — ARTIKEL, PROGRAM, GALERI
+// ===================================
+function contentFieldHTML(field){
+    const req=field.optional?"":"required"; let control="";
+    if(field.type==="select"||field.type==="event"){
+        const opts=field.type==="event"?events.map(e=>`<option value="${escapeHTML(e.id)}">${escapeHTML(e.title)}</option>`).join(""):(field.options||[]).map(v=>`<option value="${escapeHTML(v)}">${escapeHTML(v)}</option>`).join("");
+        control=`<select name="${field.key}" ${req}><option value="">Pilih ${escapeHTML(field.label.toLowerCase())}</option>${opts}</select>`;
+    } else if(field.type==="textarea") control=`<textarea name="${field.key}" rows="4" ${req}></textarea>`;
+    else control=`<input type="${field.type}" name="${field.key}" ${req}>`;
+    return `<label class="mid-field"><span>${escapeHTML(field.label)}${field.optional?" (opsional)":""}</span>${control}</label>`;
+}
+async function loadContent(module){const snap=await db.collection(CONTENT_SCHEMAS[module].collection).orderBy("updatedAt","desc").get().catch(async()=>db.collection(CONTENT_SCHEMAS[module].collection).get());contentCache[module]=snap.docs.map(d=>({...d.data(),id:d.id}));}
+async function renderContentModule(module){const schema=CONTENT_SCHEMAS[module];if(!schema)return;const el=document.getElementById("pageContent");el.innerHTML='<div class="dashboard-note">Memuat konten...</div>';
+    try{await loadContent(module);renderContentModuleBody(module);}catch(e){console.error(e);el.innerHTML='<div class="dashboard-note">Konten gagal dimuat. Periksa koneksi dan Firestore Rules.</div>';}}
+function renderContentModuleBody(module){const s=CONTENT_SCHEMAS[module],rows=contentCache[module]||[];
+    const headers=s.columns.map(k=>`<th>${escapeHTML(({title:"Judul",category:"Kategori",author:"Penulis",status:"Status",updatedAt:"Diperbarui",eventTitle:"Kegiatan",date:"Tanggal",startDate:"Mulai",endDate:"Selesai"})[k]||k)}</th>`).join("");
+    const body=rows.map(r=>`<tr>${s.columns.map(k=>`<td>${escapeHTML(r[k]||"—")}</td>`).join("")}<td class="mid-actions"><button class="secondary-button small" onclick="editContentRecord('${module}','${escapeHTML(r.id)}')">Ubah</button><button class="danger-button small" onclick="deleteContentRecord('${module}','${escapeHTML(r.id)}')">Hapus</button></td></tr>`).join("");
+    document.getElementById("pageContent").innerHTML=`<div class="mid-module-intro"><div><h3>${s.title}</h3><p>${s.description}</p></div><span class="mid-count">${rows.length} data</span></div>
+    <form id="contentForm-${module}" class="mid-module-form" onsubmit="saveContentRecord(event,'${module}')"><input type="hidden" name="recordId"><div class="mid-form-grid">${s.fields.map(contentFieldHTML).join("")}</div><div class="mid-form-actions"><button type="submit" class="primary-button">Simpan Konten</button><button type="reset" class="secondary-button" onclick="resetContentForm('${module}')">Kosongkan</button></div><p class="mid-form-message" id="contentMessage-${module}"></p></form>
+    <div class="mid-table-wrap"><table class="mid-table"><thead><tr>${headers}<th>Aksi</th></tr></thead><tbody>${body||`<tr><td colspan="${s.columns.length+1}" class="mid-empty">Belum ada konten.</td></tr>`}</tbody></table></div>`;
+}
+async function saveContentRecord(event,module){event.preventDefault();const form=event.target,s=CONTENT_SCHEMAS[module],fd=new FormData(form),id=String(fd.get("recordId")||"");const record={createdAt:(contentCache[module]||[]).find(x=>x.id===id)?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString()};s.fields.forEach(f=>record[f.key]=String(fd.get(f.key)||"").trim());if(record.eventId)record.eventTitle=events.find(e=>String(e.id)===record.eventId)?.title||"";
+    const btn=form.querySelector('[type="submit"]');btn.disabled=true;try{const ref=id?db.collection(s.collection).doc(id):db.collection(s.collection).doc();await ref.set(record,{merge:true});await loadContent(module);renderContentModuleBody(module);}catch(e){console.error(e);document.getElementById(`contentMessage-${module}`).textContent="Gagal menyimpan. Periksa koneksi dan Firestore Rules.";btn.disabled=false;}}
+function editContentRecord(module,id){const r=(contentCache[module]||[]).find(x=>x.id===id),form=document.getElementById(`contentForm-${module}`);if(!r||!form)return;form.elements.recordId.value=id;CONTENT_SCHEMAS[module].fields.forEach(f=>{if(form.elements[f.key])form.elements[f.key].value=r[f.key]||"";});form.querySelector('[type="submit"]').textContent="Perbarui Konten";form.scrollIntoView({behavior:"smooth",block:"start"});}
+function resetContentForm(module){setTimeout(()=>{const f=document.getElementById(`contentForm-${module}`);if(f){f.elements.recordId.value="";f.querySelector('[type="submit"]').textContent="Simpan Konten";}},0);}
+async function deleteContentRecord(module,id){if(!confirm("Hapus konten ini secara permanen?"))return;try{await db.collection(CONTENT_SCHEMAS[module].collection).doc(id).delete();await loadContent(module);renderContentModuleBody(module);}catch(e){console.error(e);alert("Konten gagal dihapus. Periksa Firestore Rules.");}}
+
+// ===================================
+// PENGATURAN SISTEM & ADMINISTRATOR
+// ===================================
+async function renderSystemSettings(){const el=document.getElementById("pageContent");el.innerHTML='<div class="dashboard-note">Memuat pengaturan sistem...</div>';
+    try{const snap=await db.collection("system_settings").doc("general").get();const s=snap.exists?snap.data():{};
+    el.innerHTML=`<div class="mid-module-intro"><div><h3>Pengaturan Umum MID</h3><p>Identitas dan informasi dasar aplikasi.</p></div></div><form id="systemSettingsForm" class="mid-module-form" onsubmit="saveSystemSettings(event)"><div class="mid-form-grid">
+    <label class="mid-field"><span>Nama Organisasi</span><input name="organizationName" required value="${escapeHTML(s.organizationName||"Manajemen Informasi Dakwah")}"></label>
+    <label class="mid-field"><span>Slogan</span><input name="tagline" value="${escapeHTML(s.tagline||"Membangun Gagasan, Menggerakkan Perubahan.")}"></label>
+    <label class="mid-field"><span>Email Kontak</span><input type="email" name="contactEmail" value="${escapeHTML(s.contactEmail||"")}"></label>
+    <label class="mid-field"><span>Nomor Kontak</span><input name="contactPhone" value="${escapeHTML(s.contactPhone||"")}"></label>
+    <label class="mid-field"><span>Alamat Sekretariat</span><textarea name="address" rows="3">${escapeHTML(s.address||"")}</textarea></label>
+    <label class="mid-field"><span>Tentang MID</span><textarea name="about" rows="3">${escapeHTML(s.about||"")}</textarea></label>
+    </div><div class="mid-form-actions"><button class="primary-button" type="submit">Simpan Pengaturan</button></div><p id="systemSettingsMessage" class="mid-form-message"></p></form>
+    <div class="dashboard-note"><strong>Informasi teknis</strong><p>Pengaturan ini menyimpan identitas organisasi. Pengaturan autentikasi dan kredensial tetap dikelola melalui Firebase Console.</p></div>`;
+    }catch(e){console.error(e);el.innerHTML='<div class="dashboard-note">Pengaturan gagal dimuat. Periksa Firestore Rules.</div>';}}
+async function saveSystemSettings(event){event.preventDefault();const f=event.target,fd=new FormData(f),data={};["organizationName","tagline","contactEmail","contactPhone","address","about"].forEach(k=>data[k]=String(fd.get(k)||"").trim());data.updatedAt=new Date().toISOString();data.updatedBy=currentUser?.uid||"";const b=f.querySelector('[type="submit"]');b.disabled=true;try{await db.collection("system_settings").doc("general").set(data,{merge:true});document.getElementById("systemSettingsMessage").textContent="Pengaturan berhasil disimpan.";}catch(e){console.error(e);document.getElementById("systemSettingsMessage").textContent="Gagal menyimpan pengaturan. Periksa Firestore Rules.";b.disabled=false;}}
+async function renderAdminSettings(){const el=document.getElementById("pageContent");el.innerHTML='<div class="dashboard-note">Memuat daftar administrator...</div>';
+    try{const snap=await db.collection(ADMINS_COLLECTION).get();const rows=snap.docs.map(d=>({uid:d.id,...d.data()}));
+    el.innerHTML=`<div class="mid-module-intro"><div><h3>Administrator MID</h3><p>Kelola daftar UID yang diizinkan mengakses panel administrator.</p></div><span class="mid-count">${rows.length} akun</span></div>
+    <form class="mid-module-form" onsubmit="saveAdminAccess(event)"><div class="mid-form-grid"><label class="mid-field"><span>Firebase Authentication UID</span><input name="uid" required placeholder="Tempel UID akun Firebase"></label><label class="mid-field"><span>Status Akses</span><select name="active"><option value="true">Aktif</option><option value="false">Nonaktif</option></select></label></div><div class="mid-form-actions"><button class="primary-button" type="submit">Simpan Akses Admin</button></div><p id="adminSettingsMessage" class="mid-form-message"></p></form>
+    <div class="mid-table-wrap"><table class="mid-table"><thead><tr><th>UID</th><th>Status</th><th>Aksi</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHTML(r.uid)}</td><td>${r.active===true?"Aktif":"Nonaktif"}</td><td class="mid-actions"><button class="secondary-button small" onclick="toggleAdminAccess('${escapeHTML(r.uid)}',${r.active===true?"false":"true"})">${r.active===true?"Nonaktifkan":"Aktifkan"}</button></td></tr>`).join("")||'<tr><td colspan="3" class="mid-empty">Belum ada data administrator.</td></tr>'}</tbody></table></div>
+    <div class="dashboard-note"><strong>Catatan keamanan</strong><p>Penambahan UID di sini tidak membuat akun Firebase Authentication. Buat akun terlebih dahulu di Firebase Console → Authentication → Users, lalu salin UID-nya. Jangan bagikan kata sandi.</p></div>`;
+    }catch(e){console.error(e);el.innerHTML='<div class="dashboard-note">Daftar administrator gagal dimuat. Perbarui Firestore Rules sesuai paket ini.</div>';}}
+async function saveAdminAccess(event){event.preventDefault();const fd=new FormData(event.target),uid=String(fd.get("uid")||"").trim(),active=fd.get("active")==="true";if(!uid)return;try{await db.collection(ADMINS_COLLECTION).doc(uid).set({active,updatedAt:new Date().toISOString()},{merge:true});await renderAdminSettings();}catch(e){console.error(e);document.getElementById("adminSettingsMessage").textContent="Gagal menyimpan akses. Periksa Firestore Rules.";}}
+async function toggleAdminAccess(uid,active){if(uid===currentUser?.uid&&active===false){alert("Kamu tidak dapat menonaktifkan akses akun yang sedang digunakan.");return;}if(!confirm(`${active?"Aktifkan":"Nonaktifkan"} akses administrator ini?`))return;try{await db.collection(ADMINS_COLLECTION).doc(uid).set({active,updatedAt:new Date().toISOString()},{merge:true});await renderAdminSettings();}catch(e){console.error(e);alert("Perubahan akses gagal. Periksa Firestore Rules.");}}
+
+// ===================================
 // NAVIGASI
 // ===================================
 
@@ -1196,7 +1402,12 @@ function openPage(page) {
         if (page === "anggota") renderMembers();
         else if (page === "kegiatan") renderEvents();
         else if (MANAGEMENT_COLLECTIONS[page]) renderManagementModule(page);
-        else content.innerHTML = `<div class="dashboard-note"><strong>${escapeHTML(data.title)}</strong><p>Modul ini berada di luar tahap pengembangan Manajemen.</p></div>`;
+        else if (page === "laporan-organisasi") renderOrganizationReport();
+        else if (page === "laporan-anggota") renderMemberReport();
+        else if (page === "ekspor-angket") renderSurveyExport();
+        else if (CONTENT_SCHEMAS[page]) renderContentModule(page);
+        else if (page === "sistem") renderSystemSettings();
+        else if (page === "admin") renderAdminSettings();
     }
     document.querySelector(".sidebar").classList.remove("show");
 }
@@ -1334,7 +1545,12 @@ Object.assign(window, {
     saveManagementRecord,
     editManagementRecord,
     deleteManagementRecord,
-    resetManagementForm
+    resetManagementForm,
+    renderOrganizationReport, exportOrganizationReport,
+    renderMemberReport, filterMemberReport, exportMemberReport,
+    renderSurveyExport, exportSurveyDefinitions, exportSurveyResponses,
+    renderContentModule, saveContentRecord, editContentRecord, deleteContentRecord, resetContentForm,
+    renderSystemSettings, saveSystemSettings, renderAdminSettings, saveAdminAccess, toggleAdminAccess
 });
 
 // ===================================
@@ -1374,4 +1590,20 @@ Object.assign(window, {
       @media(max-width:650px){.mid-form-grid{grid-template-columns:1fr}.mid-module-intro{flex-direction:column}.mid-module-form{padding:13px}.mid-table th,.mid-table td{padding:10px}}
     `;
     document.head.appendChild(style);
+})();
+
+
+// ===================================
+// STYLE TAMBAHAN MONITORING, KONTEN, PENGATURAN
+// ===================================
+(function injectExtendedStyles(){
+ if(document.getElementById("mid-extended-styles"))return;
+ const style=document.createElement("style");style.id="mid-extended-styles";
+ style.textContent=`
+ .mid-report-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin:12px 0 24px}
+ .mid-report-card{background:#f7f7fb;border:1px solid #e7e7f0;border-radius:13px;padding:16px;display:flex;flex-direction:column;gap:7px;min-height:88px}
+ .mid-report-card span{font-size:12px;color:#666981;font-weight:600}.mid-report-card strong{font-size:27px;color:#29236f;line-height:1.15}.mid-report-card small{font-size:11px;color:#77798a}
+ .mid-extended-styles .mid-table{min-width:700px}
+ @media(max-width:650px){.mid-report-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mid-report-card{padding:12px}.mid-report-card strong{font-size:23px}}
+ `;document.head.appendChild(style);
 })();
