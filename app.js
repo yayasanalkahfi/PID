@@ -84,6 +84,7 @@ let members = [];
 let events = [];
 let eventPosterObjectURLs = [];
 let firebaseReady = false;
+let midRegistrationInProgress = false;
 
 // ===================================
 // KONFIGURASI HALAMAN
@@ -105,7 +106,9 @@ const pages = {
     program: { title: "Program", description: "Manajemen program organisasi" },
     galeri: { title: "Galeri", description: "Dokumentasi kegiatan" },
     sistem: { title: "Pengaturan Sistem", description: "Konfigurasi aplikasi" },
-    admin: { title: "Administrator", description: "Manajemen administrator" }
+    admin: { title: "Administrator", description: "Manajemen administrator" },
+    "permohonan-anggota": { title: "Permohonan Anggota", description: "Verifikasi pendaftaran anggota mandiri" },
+    "undang-anggota": { title: "Undang Anggota", description: "Aktifkan akun anggota melalui undangan administrator" }
 };
 
 const loginPage = document.getElementById("loginPage");
@@ -1408,6 +1411,8 @@ function openPage(page) {
         else if (CONTENT_SCHEMAS[page]) renderContentModule(page);
         else if (page === "sistem") renderSystemSettings();
         else if (page === "admin") renderAdminSettings();
+        else if (page === "permohonan-anggota") renderMemberApplications();
+        else if (page === "undang-anggota") renderInviteMember();
     }
     document.querySelector(".sidebar").classList.remove("show");
 }
@@ -1437,40 +1442,48 @@ loginForm.addEventListener("submit", async function(event) {
 auth.onAuthStateChanged(async function(user) {
     currentUser = user || null;
     firebaseReady = false;
-
+    if (user && midRegistrationInProgress) return;
+    const memberPortal = document.getElementById("memberPortal");
     if (!user) {
-        members = [];
-        events = [];
+        members = []; events = [];
         appPage.style.display = "none";
+        if (memberPortal) memberPortal.style.display = "none";
         loginPage.style.display = "flex";
         loginForm.reset();
-        loginMessage.textContent = "";
         loginForm.querySelector('button[type="submit"]').disabled = false;
+        if (window.midPendingNotice) { loginMessage.textContent = window.midPendingNotice; window.midPendingNotice = ""; }
+        else loginMessage.textContent = "";
         return;
     }
-
-    loginMessage.textContent = "Memverifikasi administrator...";
+    loginMessage.textContent = "Memverifikasi akses akun...";
     try {
-        // Setiap akun administrator harus memiliki dokumen admins/{UID}.
         const adminDoc = await db.collection(ADMINS_COLLECTION).doc(user.uid).get();
-        if (!adminDoc.exists || adminDoc.data()?.active !== true) {
-            await auth.signOut();
-            loginMessage.textContent = "Akun ini belum memiliki hak akses administrator MID.";
-            return;
+        if (adminDoc.exists && adminDoc.data()?.active === true) {
+            await Promise.all([loadMembers(), loadEvents()]);
+            firebaseReady = true;
+            loginPage.style.display = "none";
+            if (memberPortal) memberPortal.style.display = "none";
+            appPage.style.display = "block";
+            const profile = document.querySelector(".profile"); if (profile) profile.textContent = user.email || "Administrator";
+            openPage("dashboard"); return;
         }
-
-        loginMessage.textContent = "Memuat data MID...";
-        await Promise.all([loadMembers(), loadEvents()]);
-        firebaseReady = true;
-        loginPage.style.display = "none";
-        appPage.style.display = "block";
-        loginMessage.textContent = "";
-        loginForm.querySelector('button[type="submit"]').disabled = false;
-        openPage("dashboard");
+        const memberDoc = await db.collection(MEMBERS_COLLECTION).doc(user.uid).get();
+        if (memberDoc.exists && ["Aktif","aktif","active","Disetujui"].includes(String(memberDoc.data().status || ""))) {
+            loginPage.style.display = "none"; appPage.style.display = "none";
+            if (memberPortal) memberPortal.style.display = "block";
+            await renderMemberPortal(memberDoc.data()); return;
+        }
+        let notice = "Akun belum disetujui administrator MID. Silakan menunggu verifikasi.";
+        try {
+            const appDoc = await db.collection("member_applications").doc(user.uid).get();
+            if (appDoc.exists && appDoc.data().status === "Ditolak") notice = "Permohonan keanggotaan ditolak. Silakan hubungi administrator MID.";
+        } catch (_) {}
+        window.midPendingNotice = notice;
+        await auth.signOut();
     } catch (error) {
-        console.error("Gagal memuat MID:", error);
-        loginMessage.textContent = "Gagal mengakses database. Periksa koneksi dan Firestore Rules.";
-        try { await auth.signOut(); } catch (signOutError) { console.error(signOutError); }
+        console.error("Verifikasi akun gagal:", error);
+        window.midPendingNotice = "Gagal memverifikasi akses. Periksa koneksi dan Firestore Rules.";
+        try { await auth.signOut(); } catch (_) {}
     }
 });
 
@@ -1510,9 +1523,7 @@ document.getElementById("menuToggle").addEventListener("click", function() {
     document.querySelector(".sidebar").classList.toggle("show");
 });
 
-document.getElementById("registerLink").addEventListener("click", function() {
-    alert("Pendaftaran akun anggota akan dibangun pada tahap berikutnya. Untuk sementara, akun dibuat oleh administrator melalui Firebase Authentication.");
-});
+document.getElementById("registerLink").addEventListener("click", showMemberRegistration);
 
 // ===================================
 // KONDISI AWAL
@@ -1550,7 +1561,8 @@ Object.assign(window, {
     renderMemberReport, filterMemberReport, exportMemberReport,
     renderSurveyExport, exportSurveyDefinitions, exportSurveyResponses,
     renderContentModule, saveContentRecord, editContentRecord, deleteContentRecord, resetContentForm,
-    renderSystemSettings, saveSystemSettings, renderAdminSettings, saveAdminAccess, toggleAdminAccess
+    renderSystemSettings, saveSystemSettings, renderAdminSettings, saveAdminAccess, toggleAdminAccess,
+    renderMemberApplications, approveMemberApplication, rejectMemberApplication, renderInviteMember, memberRegisterEvent
 });
 
 // ===================================
@@ -1607,3 +1619,102 @@ Object.assign(window, {
  @media(max-width:650px){.mid-report-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mid-report-card{padding:12px}.mid-report-card strong{font-size:23px}}
  `;document.head.appendChild(style);
 })();
+
+
+// ===================================
+// PORTAL ANGGOTA & PENDAFTARAN MANDIRI
+// ===================================
+function showMemberRegistration(){
+ const card=document.querySelector(".login-card"); if(!card)return;
+ let panel=document.getElementById("memberRegisterPanel");
+ if(panel){panel.remove();document.getElementById("registerLink").textContent="Daftar sebagai anggota";return;}
+ panel=document.createElement("div");panel.id="memberRegisterPanel";panel.innerHTML=`
+ <div class="mid-auth-panel"><h2>Pengajuan Keanggotaan</h2><p>Isi data berikut. Akun hanya dapat digunakan setelah disetujui administrator.</p>
+ <form id="memberRegisterForm" class="mid-auth-form">
+ <label>Nama lengkap<input name="name" required maxlength="100"></label>
+ <label>Email aktif<input name="email" type="email" required autocomplete="email"></label>
+ <label>Nomor WhatsApp<input name="phone" required maxlength="25"></label>
+ <label>Domisili<input name="domicile" required maxlength="120"></label>
+ <label>Alasan bergabung<textarea name="reason" rows="3" required maxlength="1000"></textarea></label>
+ <label>Kata sandi<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+ <label>Ulangi kata sandi<input name="password2" type="password" minlength="8" required autocomplete="new-password"></label>
+ <button type="submit" class="login-button">Kirim Pendaftaran</button><p id="registerMessage" class="login-message" aria-live="polite"></p>
+ </form><button type="button" class="mid-back-login" id="backToLogin">Kembali ke halaman masuk</button></div>`;
+ card.appendChild(panel);document.getElementById("registerLink").textContent="Tutup formulir";
+ document.getElementById("backToLogin").onclick=()=>{panel.remove();document.getElementById("registerLink").textContent="Daftar sebagai anggota";};
+ document.getElementById("memberRegisterForm").addEventListener("submit",submitMemberApplication);
+}
+async function submitMemberApplication(ev){
+ ev.preventDefault();const form=ev.currentTarget,fd=new FormData(form),msg=document.getElementById("registerMessage"),btn=form.querySelector("button[type=submit]");
+ const email=String(fd.get("email")).trim().toLowerCase(),password=String(fd.get("password"));
+ if(password!==String(fd.get("password2"))){msg.textContent="Konfirmasi kata sandi tidak sama.";return;}
+ btn.disabled=true;msg.textContent="Mengirim permohonan...";
+ let credential=null;
+ try{
+  midRegistrationInProgress=true;
+  credential=await auth.createUserWithEmailAndPassword(email,password);
+  const data={uid:credential.user.uid,name:String(fd.get("name")).trim(),email,phone:String(fd.get("phone")).trim(),domicile:String(fd.get("domicile")).trim(),reason:String(fd.get("reason")).trim(),status:"Menunggu Persetujuan",createdAt:new Date().toISOString(),source:"Pendaftaran Mandiri"};
+  await db.collection("member_applications").doc(credential.user.uid).set(data);
+  window.midPendingNotice="Pendaftaran berhasil dikirim. Akun menunggu persetujuan administrator dan belum dapat digunakan.";
+  midRegistrationInProgress=false;
+  await auth.signOut();
+ }catch(error){
+  console.error(error);
+  midRegistrationInProgress=false;
+  if(credential?.user){try{await credential.user.delete();}catch(_){} }
+  msg.textContent=error.code==="auth/email-already-in-use"?"Email sudah terdaftar. Silakan masuk atau hubungi administrator.":"Pendaftaran gagal. Periksa koneksi, Firebase Authentication, dan Firestore Rules.";
+  btn.disabled=false;
+ }
+}
+async function renderMemberApplications(){
+ const el=document.getElementById("pageContent");el.innerHTML='<p>Memuat permohonan...</p>';
+ try{const snap=await db.collection("member_applications").orderBy("createdAt","desc").get();const rows=snap.docs.map(d=>({id:d.id,...d.data()}));
+ el.innerHTML=`<div class="mid-module-intro"><div><h3>Permohonan Keanggotaan</h3><p>Periksa data calon anggota sebelum memberikan akses.</p></div><span class="mid-count">${rows.filter(x=>x.status==="Menunggu Persetujuan").length} menunggu</span></div><div class="mid-table-wrap"><table class="mid-table"><thead><tr><th>Nama & Email</th><th>Kontak</th><th>Domisili</th><th>Alasan</th><th>Status</th><th>Aksi</th></tr></thead><tbody>${rows.map(x=>`<tr><td><b>${escapeHTML(x.name||"-")}</b><br>${escapeHTML(x.email||"")}</td><td>${escapeHTML(x.phone||"-")}</td><td>${escapeHTML(x.domicile||"-")}</td><td>${escapeHTML(x.reason||"-")}</td><td>${escapeHTML(x.status||"-")}</td><td class="mid-actions">${x.status==="Menunggu Persetujuan"?`<button class="primary-button small" onclick="approveMemberApplication('${escapeHTML(x.id)}')">Setujui</button><button class="danger-button small" onclick="rejectMemberApplication('${escapeHTML(x.id)}')">Tolak</button>`:"-"}</td></tr>`).join("")||'<tr><td colspan="6" class="mid-empty">Belum ada permohonan.</td></tr>'}</tbody></table></div>`;
+ }catch(e){console.error(e);el.innerHTML='<p>Gagal memuat permohonan. Pastikan Firestore Rules sudah diperbarui.</p>';}
+}
+async function approveMemberApplication(uid){
+ if(!confirm("Setujui permohonan ini dan aktifkan akses portal anggota?"))return;
+ try{const ref=db.collection("member_applications").doc(uid),snap=await ref.get();if(!snap.exists)throw new Error("Permohonan tidak ditemukan");const a=snap.data();
+ await db.collection("members").doc(uid).set({uid,name:a.name,email:a.email,phone:a.phone,domicile:a.domicile,level:"T1",status:"Aktif",joinedAt:new Date().toISOString(),source:a.source||"Pendaftaran Mandiri"});
+ await ref.update({status:"Disetujui",approvedAt:new Date().toISOString(),approvedBy:currentUser.uid});
+ await loadMembers();
+ alert("Permohonan disetujui. Anggota kini dapat masuk menggunakan email dan kata sandi yang didaftarkan.");await renderMemberApplications();
+ }catch(e){console.error(e);alert("Persetujuan gagal. Periksa Firestore Rules dan data permohonan.");}
+}
+async function rejectMemberApplication(uid){const reason=prompt("Alasan penolakan (opsional):")||"";if(!confirm("Tolak permohonan anggota ini?"))return;try{await db.collection("member_applications").doc(uid).update({status:"Ditolak",rejectionReason:reason,rejectedAt:new Date().toISOString(),rejectedBy:currentUser.uid});await renderMemberApplications();}catch(e){console.error(e);alert("Gagal memperbarui status permohonan.");}}
+function renderInviteMember(){
+ const el=document.getElementById("pageContent");el.innerHTML=`<div class="mid-module-intro"><div><h3>Undang Anggota</h3><p>Gunakan jalur undangan untuk akun yang sudah dibuat di Firebase Authentication.</p></div></div>
+ <div class="mid-module-form"><form id="midInviteForm"><div class="mid-form-grid">
+ <label class="mid-field">UID Firebase Authentication<input name="uid" required placeholder="Tempel UID akun anggota"></label>
+ <label class="mid-field">Nama lengkap<input name="name" required></label><label class="mid-field">Email akun<input name="email" type="email" required></label>
+ <label class="mid-field">Nomor WhatsApp<input name="phone"></label><label class="mid-field">Domisili<input name="domicile"></label>
+ <label class="mid-field">Tingkat awal<select name="level"><option>T1</option><option>T2</option><option>T3</option></select></label>
+ </div><div class="mid-form-actions"><button class="primary-button" type="submit">Aktifkan Akses Anggota</button></div><p id="midInviteMessage" class="mid-form-message"></p></form></div>
+ <div class="dashboard-note"><strong>Alur undangan</strong><p>Admin membuat akun melalui Firebase Console → Authentication → Add user, lalu memberikan email dan kata sandi sementara kepada anggota. Setelah itu, salin UID akun dan isi formulir ini. Jangan pernah menaruh kata sandi di Firestore.</p></div>`;
+ document.getElementById("midInviteForm").addEventListener("submit",async ev=>{ev.preventDefault();const fd=new FormData(ev.currentTarget),uid=String(fd.get("uid")).trim(),email=String(fd.get("email")).trim().toLowerCase();try{await db.collection("members").doc(uid).set({uid,name:String(fd.get("name")).trim(),email,phone:String(fd.get("phone")||"").trim(),domicile:String(fd.get("domicile")||"").trim(),level:String(fd.get("level")),status:"Aktif",joinedAt:new Date().toISOString(),source:"Undangan Administrator"});document.getElementById("midInviteMessage").textContent="Akses anggota berhasil diaktifkan. Berikan kredensial login Firebase kepada anggota.";ev.currentTarget.reset();}catch(e){console.error(e);document.getElementById("midInviteMessage").textContent="Gagal mengaktifkan akun. Pastikan UID sesuai akun Authentication dan Firestore Rules aktif.";}});
+}
+async function renderMemberPortal(member){
+ const el=document.getElementById("memberPortal");if(!el)return;
+ const level=member.level||"T1";let visible=[],myRegs=[];
+ try{const snap=await db.collection("events").where("status","==","Dibuka").get();visible=snap.docs.map(d=>({id:d.id,...d.data()})).filter(e=>(EVENT_LEVEL_ORDER[level]||1)>=(EVENT_LEVEL_ORDER[e.visibility||"T1"]||1));const rs=await db.collection("registrations").where("memberId","==",currentUser.uid).get();myRegs=rs.docs.map(d=>({id:d.id,...d.data()}));}catch(e){console.error(e);}
+ el.innerHTML=`<div class="mid-member-shell"><header><div><b>MID</b><small>Portal Anggota</small></div><div class="mid-member-user">${escapeHTML(member.name||currentUser.email)} · ${escapeHTML(level)} <button id="memberLogout">Keluar</button></div></header>
+ <section class="mid-member-welcome"><span>RUANG ANGGOTA MID</span><h1>Selamat datang, ${escapeHTML(member.name||"Anggota")}.</h1><p>Temukan kegiatan, kelola partisipasi, dan terus bertumbuh bersama MID.</p><div class="mid-member-tags"><span>Status: Aktif</span><span>Tingkat: ${escapeHTML(level)}</span></div></section>
+ <section class="mid-member-section"><h2>Kegiatan untukmu</h2><div class="mid-member-cards">${visible.map(e=>`<article><small>${escapeHTML(e.category||"Kegiatan MID")} · ${escapeHTML(e.date||"")}</small><h3>${escapeHTML(e.title||"Tanpa judul")}</h3><p>${escapeHTML(e.description||"")}</p><p>Lokasi: ${escapeHTML(e.location||"Belum ditentukan")}</p><span>${(e.eligibleLevels||["T1","T2","T3"]).includes(level)?"Pendaftaran dapat diajukan":"Belum memenuhi tingkat peserta"}</span>${(e.eligibleLevels||["T1","T2","T3"]).includes(level)?`<button class="mid-member-register" onclick="memberRegisterEvent('${escapeHTML(e.id)}')">Ajukan Pendaftaran</button>`:""}</article>`).join("")||'<p>Belum ada kegiatan yang tersedia untuk tingkat keanggotaanmu.</p>'}</div></section>
+ <section class="mid-member-section"><h2>Pendaftaran Kegiatanku</h2><div class="mid-member-profile">${myRegs.map(r=>`<p><b>${escapeHTML(r.eventTitle||r.eventId||"Kegiatan")}</b>${escapeHTML(r.status||"Menunggu")}</p>`).join("")||"Belum ada pengajuan pendaftaran kegiatan."}</div></section>
+ <section class="mid-member-section"><h2>Profil Keanggotaan</h2><div class="mid-member-profile"><p><b>Nama</b>${escapeHTML(member.name||"-")}</p><p><b>Email</b>${escapeHTML(member.email||currentUser.email||"-")}</p><p><b>Nomor WhatsApp</b>${escapeHTML(member.phone||"-")}</p><p><b>Domisili</b>${escapeHTML(member.domicile||"-")}</p><p><b>Tingkat</b>${escapeHTML(level)}</p></div></section></div>`;
+ document.getElementById("memberLogout").onclick=()=>auth.signOut();
+}
+async function memberRegisterEvent(eventId){
+ const event=events.find(e=>String(e.id)===String(eventId)) || await (async()=>{const d=await db.collection("events").doc(String(eventId)).get();return d.exists?{id:d.id,...d.data()}:null;})();
+ if(!event){alert("Kegiatan tidak ditemukan.");return;}const level=(await db.collection("members").doc(currentUser.uid).get()).data()?.level||"T1";
+ if(!(event.eligibleLevels||["T1","T2","T3"]).includes(level)){alert("Tingkat keanggotaan belum memenuhi persyaratan kegiatan.");return;}
+ try{const duplicate=await db.collection("registrations").where("memberId","==",currentUser.uid).get();if(duplicate.docs.some(d=>String(d.data().eventId)===String(eventId))){alert("Kamu sudah mengajukan pendaftaran kegiatan ini.");return;}
+ await db.collection("registrations").add({eventId:String(eventId),eventTitle:event.title||"",memberId:currentUser.uid,memberName:(await db.collection("members").doc(currentUser.uid).get()).data()?.name||currentUser.email,status:"Menunggu",note:"",createdAt:new Date().toISOString()});alert("Pengajuan pendaftaran berhasil dikirim dan menunggu keputusan administrator.");const m=(await db.collection("members").doc(currentUser.uid).get()).data();await renderMemberPortal(m);
+ }catch(e){console.error(e);alert("Pengajuan gagal. Periksa Firestore Rules atau coba kembali.");}
+}
+// Tambahkan pintasan verifikasi dan undangan pada grup Manajemen tanpa menghapus menu lain.
+(function addMemberAccessMenus(){const group=document.getElementById("group-manajemen");if(!group||group.querySelector('[data-page="permohonan-anggota"]'))return;group.insertAdjacentHTML("beforeend",'<a href="#" class="menu-item" data-page="permohonan-anggota">Permohonan Anggota</a><a href="#" class="menu-item" data-page="undang-anggota">Undang Anggota</a>');group.querySelectorAll('.menu-item[data-page="permohonan-anggota"],.menu-item[data-page="undang-anggota"]').forEach(item=>item.addEventListener("click",ev=>{ev.preventDefault();if(firebaseReady)openPage(item.dataset.page);}));})();
+(function addMemberPortalShell(){if(document.getElementById("memberPortal"))return;const node=document.createElement("div");node.id="memberPortal";node.style.display="none";document.body.appendChild(node);const style=document.createElement("style");style.textContent=`
+ .mid-auth-panel{margin-top:18px;padding-top:16px;border-top:1px solid #e7e7ef}.mid-auth-panel h2{margin:0 0 6px}.mid-auth-panel>p{font-size:13px;color:#707386}.mid-auth-form{display:grid;gap:10px}.mid-auth-form label{display:grid;gap:5px;font-size:13px;font-weight:600}.mid-auth-form input,.mid-auth-form textarea{width:100%;box-sizing:border-box;border:1px solid #d8dbe5;border-radius:8px;padding:10px;font:inherit}.mid-back-login{margin-top:12px;border:0;background:none;color:#39327e;text-decoration:underline;padding:8px;cursor:pointer}
+ #memberPortal{min-height:100vh;background:#f5f6fa;color:#24243a;font-family:Arial,sans-serif}.mid-member-shell{max-width:1100px;margin:auto;padding:0 22px 60px}.mid-member-shell header{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e5e6ed}.mid-member-shell header b{font-size:24px;color:#302a79}.mid-member-shell header small{display:block;color:#777;font-size:11px}.mid-member-user{font-size:13px}.mid-member-user button{margin-left:12px;border:0;background:#302a79;color:#fff;border-radius:8px;padding:9px 13px}.mid-member-welcome{margin:30px 0;padding:34px;border-radius:18px;background:linear-gradient(120deg,#211b63,#5141a5);color:#fff}.mid-member-welcome>span{font-size:11px;letter-spacing:2px}.mid-member-welcome h1{font-size:clamp(25px,5vw,40px);margin:12px 0}.mid-member-welcome p{opacity:.85}.mid-member-tags{display:flex;gap:8px;flex-wrap:wrap}.mid-member-tags span{padding:7px 11px;border-radius:20px;background:#ffffff22;font-size:12px}.mid-member-section{margin:30px 0}.mid-member-section h2{font-size:21px}.mid-member-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.mid-member-cards article,.mid-member-profile{background:#fff;border:1px solid #e7e8ef;border-radius:13px;padding:18px}.mid-member-cards h3{margin:9px 0}.mid-member-cards p,.mid-member-cards small{color:#6c6d7c;font-size:13px;line-height:1.5}.mid-member-cards article>span{font-size:12px;color:#302a79;font-weight:700}.mid-member-register{display:block;margin-top:12px;border:0;border-radius:8px;background:#302a79;color:#fff;padding:10px 13px;font-weight:700}.mid-member-profile{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.mid-member-profile p{margin:0;font-size:13px}.mid-member-profile b{display:block;color:#777;margin-bottom:5px}@media(max-width:600px){.mid-member-shell{padding:0 14px 40px}.mid-member-welcome{padding:24px}.mid-member-user{font-size:11px}}
+ `;document.head.appendChild(style);})();
